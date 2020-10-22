@@ -4,28 +4,29 @@ import random
 import urllib
 import zipfile
 import numpy as np
-import tensorflow as tf
+import tensorflow.compat.v1 as tf
 
 # Training parameters
 tf.enable_eager_execution()
 learning_rate = 0.1
 batch_size =128
-number_of_steps = 3_000_000
-display_step = 10_000
-evaluation_step = 200_000
+number_of_steps = 3000000 # 3 million
+display_step = 10000 # 10 thousand
+evaluation_step = 200000 # 200 thousand
 device = "/cpu:0" # Enforces computation done on CPU
-optimiser = tf.keras.optimizers.SGD(learning_rate # Stochastic gradient descent optimiser
+optimiser = tf.keras.optimizers.SGD(learning_rate) # Stochastic gradient descent optimiser
 
 # Evaluation parameters
 evaluate_words = ["five", "of", "going", "american", "british"]
 
 # Word2Vec parameters
 embedding_size = 200 # Dimension of the embedding vector
-maximum_vocabulary_size = 50_000 # Total number of different words in the vocabulary
+maximum_vocabulary_size = 50000 # Total number of different words in the vocabulary i.e. 50 thousand
 minimum_occurrence = 10 # Remove all words that does not appears at least this number of times
 skip_window = 3 # How many words to consider left and right
 number_of_skips = 2 # How many times to reuse an input to generate a label
 number_of_samples = 64 # Number of negative examples to sample
+number_of_nearest_neighbours = 8
 
 # Download a small batch of Wikipedia articles collection
 url = "https://github.com/AmirYunus/py_tensorflow_word_embedding/blob/master/text.zip"
@@ -34,10 +35,10 @@ data_path = "text.zip"
 if not os.path.exists(data_path):
     print("Downloading the dataset... (It may take some time)")
     filename, _ = urllib.request.urlretrieve(url, data_path)
-    print("Done!")
 
+print("Dataset loaded")
 with zipfile.ZipFile(data_path) as f: # Unzip the dataset file. Text has already been processed
-    text_words = f.read(f.namelist()[0]).lower().split()
+    text_words = f.read(f.namelist()[0]).lower().decode().split()
 
 # Build the dictionary
 count = [("UNK", -1)] # Replace rare words with UNK token i.e. unknown
@@ -114,20 +115,41 @@ def next_batch(batch_size, number_of_skips, skip_window):
     return batch, labels
 
 with tf.device(device):
-    embedding = tf.Variable(tf.random.normal([vocabulary_size, embedding_size])) # Create the embedding variable (each row represent a word embedding vector)
-    nce_weights = tf.Variable(tf.random.normal([vocabulary_size, embedding_size])) # Construct the weight variable for NCE loss
-    nce_biases = tf.Variable(tf.zeros([vocabulary_size]))
+    embedding = tf.Variable(
+        tf.random.normal(
+            [vocabulary_size, embedding_size]
+            )
+        ) # Create the embedding variable (each row represent a word embedding vector)
+    nce_weights = tf.Variable(
+        tf.random.normal(
+            [vocabulary_size, embedding_size]
+            )
+        ) # Construct the weight variable for NCE loss
+    nce_biases = tf.Variable(
+        tf.zeros(
+            [vocabulary_size]
+            )
+        )
 
-def get_embedding(input):
+def get_embedding(input_batch):
     with tf.device(device):
-        input_embedded = tf.nn.embedding_lookup(embedding, input) # Lookup the corresponding embedding vectors for each sample in the input
+        input_embedded = tf.nn.embedding_lookup(embedding, input_batch) # Lookup the corresponding embedding vectors for each sample in the input
         return input_embedded
 
 # Compute the average NCE loss for the batch
 def nce_loss(input_embedded, target):
     with tf.device(device):
         target = tf.cast(target, tf.int64)
-        loss = tf.reduce_mean(tf.nn.nce_loss(weights = nce_weights, biases = nce_biases, labels = target, inputs = input_embedded, num_sampled = number_of_samples, num_classes = vocabulary_size))
+        loss = tf.reduce_mean(
+            tf.nn.nce_loss(
+                weights = nce_weights,
+                biases = nce_biases,
+                labels = target,
+                inputs = input_embedded,
+                num_sampled = number_of_samples,
+                num_classes = vocabulary_size
+                )
+            )
         return loss
 
 # Compute the cosine similarity between input data embedding and every embedding vectors
@@ -137,19 +159,40 @@ def evaluate(input_embedded):
         input_embedded_normalised = input_embedded / tf.sqrt(tf.reduce_sum(tf.square(input_embedded)))
         embedding_normalised = embedding / tf.sqrt(tf.reduce_sum(tf.square(embedding), 1, keepdims = True), tf.float32)
         cosine_similarity = tf.matmul(input_embedded_normalised, embedding_normalised, transpose_b = True)
-        return consine_similarity
+        return cosine_similarity
 
 # Optimisation process
-def run_optimisation(input, target):
+def run_optimisation(input_batch, target_batch):
     with tf.device(device):
         with tf.GradientTape() as g: # Wrap computation inside a GradientTape for automatic differentiation
-            embedding = get_embedding(input)
-            loss = nce_loss(embedding, target)
+            embedding = get_embedding(input_batch)
+            loss = nce_loss(embedding, target_batch)
 
         gradients = g.gradient(loss, [embedding, nce_weights, nce_biases]) # Compute gradients
-        optimser.apply_gradients(zip(gradients, [embedding, nce_weights, nce_biases]))
+        optimiser.apply_gradients(zip(gradients, [embedding, nce_weights, nce_biases]))
 
 # Words for testing
-test_input - np.array([word_to_id[each_word] for each_word in evaluate_words])
+test_input = np.array([word_to_id[each_word] for each_word in evaluate_words])
 
-# Run training for the 
+# Run training for the given number of steps
+for each_step in range(1, number_of_steps + 1):
+    input_batch, target_batch = next_batch(batch_size, number_of_skips, skip_window)
+    run_optimisation(input_batch, target_batch)
+
+    if each_step % display_step == 0 or each_step == 1:
+        loss = nce_loss(get_embedding(input_batch), target_batch)
+        print(f"step: {each_step}    loss: {loss}")
+    
+    if each_step % evaluation_step == 0 or each_step == 1:
+        print("\nEvaluating...")
+        similar = evaluate(get_embedding(test_input)).numpy()
+
+        for each_index in range(len(evaluate_words)):
+            top_k = number_of_nearest_neighbours
+            nearest = (-similar[each_index, :]).argsort()[1:top_k + 1]
+            log_str = f"{evaluate_words[each_index]} nearest neighbours"
+
+            for each_k in range(top_k):
+                log_str = f"{log_str}, {id_to_word[nearest[each_k]]}"
+            
+            print(log_str)
